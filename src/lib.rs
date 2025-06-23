@@ -58,7 +58,31 @@ macro_rules! bail {
 ///   field2: usize,
 /// }
 /// ```
-#[proc_macro_derive(IntoValue, attributes(rename))]
+///
+/// A custom function for serizaling a field can be passed with the
+/// `#[serialize_with]` attribute. This takes any function that takes in the
+/// type of the field it is attached to and returns a Value.
+///
+/// ```ingore
+/// mod SomeOtherModule {
+///     pub struct PrettyName {
+///         pub name: String,
+///     }
+/// }
+///
+/// use SomeOtherModule::PrettyName;
+///
+/// fn format_pretty_name(input: PrettyName) -> Value {
+///     Value::Str(format!("**{}**", input.name).into())
+/// }
+///
+/// #[derive(IntoValue)]
+/// struct NeedsIntoValue {
+///     #[serialize_with(format_pretty_name)]
+///     field1: PrettyName,
+/// }
+/// ```
+#[proc_macro_derive(IntoValue, attributes(rename, serialize_with))]
 pub fn derive_into_value(
   item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
@@ -124,10 +148,21 @@ fn gather_input(
       None
     };
 
+    let serialize_function = match field
+      .attrs
+      .iter()
+      .find(|attr| attr.path().is_ident("serialize_with"))
+      .map(|attr| attr.parse_args::<Ident>())
+    {
+      Some(val) => Some(val?),
+      None => None,
+    };
+
     fieldlist.push(Element {
       new_id,
       old_id: old_id.to_string(),
       ident: old_id.clone(),
+      serialize_function,
     });
   }
 
@@ -138,15 +173,25 @@ fn gather_input(
          new_id,
          old_id,
          ident,
+         serialize_function,
        }| {
+        let to_value_fun = if let Some(serializer) = serialize_function {
+          quote! {
+              #serializer
+          }
+        } else {
+          quote! {
+              typst::foundations::IntoValue::into_value
+          }
+        };
         if let Some(ref n) = new_id {
           quote! {
-            #n => self.#ident.into_value()
+            #n => #to_value_fun(self.#ident)
           }
         } else {
           let fun = syn::Ident::new(&rename, rename_attr.span());
           quote! {
-            heck::#fun(#old_id).to_string() => self.#ident.into_value()
+            heck::#fun(#old_id).to_string() => #to_value_fun(self.#ident)
           }
         }
       },
@@ -203,4 +248,5 @@ struct Element {
   old_id: String,
   // the identifier of the struct field
   ident: Ident,
+  serialize_function: Option<Ident>,
 }
